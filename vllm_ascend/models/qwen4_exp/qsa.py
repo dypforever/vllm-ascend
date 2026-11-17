@@ -18,6 +18,7 @@ from dataclasses import replace
 from typing import Any, Protocol, TypeAlias, cast
 
 import torch
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
@@ -29,7 +30,7 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
 )
-from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -49,7 +50,7 @@ from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .lightning_indexer import qsa_select_paged_tokens_lightning_v2
 
 if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
@@ -68,6 +69,8 @@ if vllm_version_is("0.33.0"):
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSAFlashAttentionBackend  # type: ignore[attr-defined]
 else:
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
+
+QSA_INDEXER_KERNEL_BLOCK_SIZE = 512
 
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
@@ -429,8 +432,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using the CANN Lightning Indexer v2 backend.")
-        return qsa_select_paged_tokens_lightning(
+        logger.info_once(
+            "QSA is using native request-batched CANN LightningIndexerV2 (page_size=%d).",
+            self.compressed_key_cache.kv_cache.shape[1],
+        )
+        return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
             metadata.block_table,
@@ -441,6 +447,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             self.token_topk,
             self.compress_ratio,
             out,
+            # Host counts are prepared with this batch's QSA metadata.
+            num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
+            num_actual_tokens=getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens),
         )
 
 
@@ -711,10 +720,37 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
         return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
 
 
+class AscendQSACompressedKeyBackend(QSAIndexerBackend):  # type: ignore[valid-type, misc]
+    uses_descriptor_cache_view = True
+    selects_kernel_blocks_per_attention_group = True
+
+    @staticmethod
+    def get_name() -> str:
+        return "QWEN4_EXP_QSA_COMPRESSED_KEY_ASCEND"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        # vLLM selects kernel blocks in original-token units. At 4:1 this
+        # gives LIv2 128 compressed keys per page.
+        return [QSA_INDEXER_KERNEL_BLOCK_SIZE]
+
+
+class AscendQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):  # type: ignore[misc, name-defined]
+    def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
+        super().__init__(vllm_config=vllm_config, **kwargs)
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.use_v2_model_runner:
+            return AscendQSACompressedKeyBackend
+        return super().get_attn_backend()
+
+
 # The upstream owner resolves these names from its module globals during
 # construction. Replace only the platform-specific components, leaving model
 # structure, cache specifications and weight mapping in upstream vLLM.
 upstream_indexer.apply_qsa_rope = apply_qsa_rope
+upstream_indexer.QSACompressedKeyCache = AscendQSACompressedKeyCache
 upstream_qsa.QSAIndexer = AscendQSAIndexer
 if vllm_version_is("0.33.0"):
     upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl  # type: ignore[attr-defined]
