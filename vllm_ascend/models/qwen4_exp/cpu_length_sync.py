@@ -84,6 +84,7 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
         allowed_builders = {
             AscendQSABackend: (Qwen4ExpQSAMetadataBuilder,),
             QSAIndexerBackend: qsa_state_builders,
+            ascend_qsa.AscendQSACompressedKeyBackend: qsa_state_builders,
             AscendGDNAttentionBackend: (AscendGDNAttentionMetadataBuilder,),
             AscendGDNHostMetadataBackend: (AscendGDNHostMetadataBuilder,),
             AscendGDNFusedAttentionBackend: (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder),
