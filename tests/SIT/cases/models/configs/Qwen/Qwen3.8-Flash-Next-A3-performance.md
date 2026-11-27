@@ -1,4 +1,4 @@
-# Qwen3.8 Flash Next W4A8 A3 performance measurements
+# Qwen3.8 Flash Next W4A8 A3 performance and accuracy measurements
 
 These reference measurements were collected on Atlas A3 on 2026-11-26 with AISBench. They accompany [the Qwen3.8 Flash Next nightly proposal](https://github.com/vllm-project/vllm-ascend/pull/22291). The manual runs used their own request counts, rates, cache settings, and routing. CI regression thresholds require hardware runs with the nightly configuration.
 
@@ -55,3 +55,13 @@ Token throughput is in tokens per second. The per-card columns use a four-physic
 | 16K pure D | 103382.12 | 25845.53 | 6461.38 | 1615.35 | 109843.51 | 27460.88 | 6.3099 | 378.594 |
 
 For reference, the full-run AISBench table for the selected 128K pure D round reported 512 requests, mean TTFT of 16,810.1 ms, mean TPOT of 18.6 ms, 3,276.9468 output tokens/s, and 3.2144 QPS. The steady-stage row above uses the 384-request analysis of that same run.
+
+## GPQA Diamond accuracy
+
+AISBench evaluated all 198 GPQA Diamond questions in each of three rounds through the A3 1P1D proxy. The evaluation used concurrency 32, P local prefix caching enabled, D local prefix caching disabled, and KV cache pooling disabled. Sampling used temperature 1.0, top-k 20, and top-p 0.95 with normal EOS handling.
+
+| Evaluation | Selected round | Correct / total | Accuracy |
+| --- | ---: | ---: | ---: |
+| GPQA Diamond, full split | 3 (median of three) | 181 / 198 | 91.41% |
+
+This measurement uses the disaggregated service. The nightly proposal specifies a colocated GPQA job for its own validation.
