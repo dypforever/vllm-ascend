@@ -84,3 +84,12 @@ divided by proposed draft tokens.
 
 The A5 decode nightly YAML uses a fully repeated prompt. Benchmark comparisons
 should match its workload, serving configuration, and measurement window.
+
+## Historical GPQA Diamond accuracy
+
+A separate A5 run on November 21, 2026, used 1P1D with tiered KV pooling.
+The third round scored **91.41% (181/198)** on the full GPQA Diamond set, the
+highest of three completed rounds. The other two rounds each scored 89.90%
+(178/198). Sampling used `do_sample=true`, temperature 1.0, top-k 20, and top-p 0.95.
+
+This measurement applies to the pooled deployment used in that run.
