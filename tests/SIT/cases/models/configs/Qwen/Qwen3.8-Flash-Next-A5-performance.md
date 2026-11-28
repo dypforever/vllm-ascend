@@ -8,16 +8,81 @@ They provide measured operating points for the
 
 ## Test environment
 
-- Basic 1P1D with four devices per role and DP2/TP2/EP4/PP1 on each side. Tiered KV pooling was disabled.
-- Both roles used the A5 openEuler r177 image with CANN 9.3.0, vLLM v0.34.0, and the
-  vLLM-Ascend wheel built from `4f49ae332de1b1e572587bb9162cfb991eadf2ed`.
-- The maximum context length was 143,360 tokens. Prefill used Fastokens 0.3.5.
-  Decode used Static Kernel with Slice excluded, SuperKernel disabled, and MTP with three speculative tokens.
-- The 90% single-prefix cases used one shared prefix covering 90% of each input. Prefill-only requests
-  went directly to P. End-to-end and decode-only requests went through the 1P1D proxy.
-  Decode-only runs used warmed prompts with P-side prefix caching. D-side prefix caching was disabled.
-- Fixed-rate tests sent requests at uniform intervals. A configured request rate of zero means
-  no pacing limit. Warmup and profiling requests were excluded from the measured rounds.
+### Runtime
+
+The November 26–27 performance runs used basic 1P1D, with four A5 devices per
+role and DP2/TP2/EP4/PP1 on each side. Tiered KV pooling was disabled.
+
+| Component | Version or configuration |
+| --- | --- |
+| Container base | A5 openEuler r177, CANN 9.3.0, shared by P, D, and proxy |
+| vLLM | v0.34.0, commit `62d4bc3c7e33b1b6c906e233e6af2d3506c482ca` |
+| vLLM-Ascend | Wheel built from `4f49ae332de1b1e572587bb9162cfb991eadf2ed`, with no separately applied PRs |
+| Python and NPU stack | Python 3.12.13, PyTorch 2.10.0+cpu, torch-npu 2.10.0.post7, Triton Ascend 3.6.0.post2 |
+| Other packages | Fastokens 0.3.5, MemCache Hybrid and MemFabric Hybrid 1.5.0.dev20261123 |
+| Benchmark client | AISBench 3.1.20261013 with fixed-interval pacing when `burstiness=0` |
+
+The runtime wheel installation had two local adjustments. The Static Kernel
+blacklist excluded Slice, and the PyTorch profiler retained CANN analysis output
+for separate profiling runs. AISBench used its native metric calculations.
+Warmup and profiling requests were excluded from the scored rounds.
+
+### Prefill and decode launch settings
+
+Both roles set `--max-model-len 143360`, `--max-num-seqs 64`,
+`--max-num-batched-tokens 8192`, and `--gpu-memory-utilization 0.9`.
+They enabled Ascend quantization, async scheduling, expert parallelism, and
+`enable_flashcomm1=true`. Mamba cache used `align` mode with `bfloat16` SSM
+state. Both roles used `qwen3_5_mtp` with three speculative tokens.
+
+| Setting | Prefill (P) | Decode (D) |
+| --- | --- | --- |
+| Visible device IDs | 0–3 | 4–7 |
+| HTTP port | 18347 | 18348 |
+| DP RPC port | 19345 | 19346 |
+| Distributed master port | 29450 | 29460 |
+| Local prefix cache | Off for prefill-only without a shared prefix. On for the 90% single-prefix case, end-to-end, and decode-only. | Off |
+| Fastokens | Enabled | Disabled |
+| Graph mode | `NONE` | `FULL_DECODE_ONLY` |
+| Ascend compilation settings | `enable_npugraph_ex=true`, Static Kernel off, SuperKernel off | `enable_npugraph_ex=true`, Static Kernel on with Slice excluded, SuperKernel off |
+| API server count | 1 | 1 |
+| Renderer workers | Default | `--renderer-num-workers 4` |
+| MooncakeConnectorV2 | `kv_producer`, port 33470 | `kv_consumer`, port 33480 |
+| `HCCL_NPU_SOCKET_PORT_RANGE` | 61400–61499 | 61500–61599 |
+| `HCCL_IF_BASE_PORT` | 62000 | 63000 |
+| `VLLM_ENGINE_READY_TIMEOUT_S` | 2400 | 4800 |
+
+The launchers sourced the Ascend toolkit, Ascend NPU IR from the active toolkit
+tree, and NNAL ATB with C++ ABI 1. Python and its package directories were
+resolved from the interpreter in the container. The library path included the
+installed PyTorch, torch-npu, MemCache, MemFabric, and Mooncake libraries. The
+launchers also sourced vLLM-Ascend's installed custom-op environment when present.
+
+The communication environment used `HCCL_OP_EXPANSION_MODE=AIV`,
+`HCCL_BUFFSIZE=8192`, `HCCL_EXEC_TIMEOUT=204`, and `HCCL_CONNECT_TIMEOUT=120`.
+Set the service IP and NIC for the target host using the existing
+`VLLM_HOST_IP`, `HCCL_IF_IP`, `HCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, and
+`TP_SOCKET_IFNAME` settings. Both roles used the v2 model runner,
+`TASK_QUEUE_ENABLE=1`, and `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`.
+
+### Proxy and benchmark routing
+
+The 1P1D proxy used the same vLLM-Ascend source revision as the wheel. With
+`ascend_repo` set to its checkout and `service_ip` set to the P/D service address,
+the launcher used this port mapping:
+
+```bash
+python3 "$ascend_repo/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py" \
+    --host 0.0.0.0 --port 18349 \
+    --prefiller-hosts "$service_ip" --prefiller-ports 18347 \
+    --decoder-hosts "$service_ip" --decoder-ports 18348
+```
+
+Prefill-only requests went directly to P. End-to-end and decode-only requests
+went through the proxy. Decode-only runs used warmed prompts with P-side prefix
+caching. The 90% single-prefix cases used one shared prefix covering 90% of each
+input. With a positive configured request rate, AISBench sent requests at fixed
+intervals. A configured rate of zero means no pacing limit.
 
 ## Workloads and selected rounds
 
